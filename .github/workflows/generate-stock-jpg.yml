@@ -1,0 +1,66 @@
+name: Generate 4K Stock JPG Batch
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: Number of JPG images to generate (1-150)
+        required: true
+        default: "150"
+      start:
+        description: Starting index (default 1)
+        required: true
+        default: "1"
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: stock-jpg/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r stock-jpg/requirements.txt
+
+      - name: Validate secret
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "OPENAI_API_KEY repository secret is required."
+            exit 1
+          fi
+
+      - name: Generate and validate JPG batch
+        run: |
+          python stock-jpg/generate_stock.py \
+            --count "${{ inputs.count }}" \
+            --start "${{ inputs.start }}" \
+            --output stock-jpg/output \
+            --zip stock-jpg/dist/indonesian_mature_lifestyle_4k.zip
+
+      - name: Inspect ZIP
+        run: |
+          unzip -l stock-jpg/dist/indonesian_mature_lifestyle_4k.zip
+          echo "JPG count: $(unzip -Z1 stock-jpg/dist/indonesian_mature_lifestyle_4k.zip | grep -Ei '\.jpg$' | wc -l)"
+
+      - name: Upload final ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: indonesian-mature-lifestyle-4k-jpg
+          path: stock-jpg/dist/indonesian_mature_lifestyle_4k.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
