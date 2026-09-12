@@ -1,0 +1,295 @@
+name: Build TextLauncher IPA
+
+on:
+  push:
+    branches:
+      - textlauncher-ipa-build
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate TextLauncher project
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf GeneratedTextLauncher
+          mkdir -p GeneratedTextLauncher/TextLauncher
+
+          cat > GeneratedTextLauncher/project.yml <<'YAML'
+          name: TextLauncher
+          options:
+            deploymentTarget:
+              iOS: "16.0"
+          targets:
+            TextLauncher:
+              type: application
+              platform: iOS
+              sources:
+                - TextLauncher
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: internal.textlauncher
+                  PRODUCT_NAME: TextLauncher
+                  MARKETING_VERSION: "1.0"
+                  CURRENT_PROJECT_VERSION: "1"
+                  SWIFT_VERSION: "5.0"
+                  TARGETED_DEVICE_FAMILY: "1"
+                  GENERATE_INFOPLIST_FILE: YES
+                  INFOPLIST_KEY_CFBundleDisplayName: "Text Launcher"
+                  INFOPLIST_KEY_UIUserInterfaceStyle: Dark
+                  INFOPLIST_KEY_LSRequiresIPhoneOS: YES
+                  INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+          schemes:
+            TextLauncher:
+              build:
+                targets:
+                  TextLauncher: all
+          YAML
+
+          cat > GeneratedTextLauncher/TextLauncher/TextLauncherApp.swift <<'SWIFT'
+          import SwiftUI
+          import UIKit
+
+          struct LauncherItem: Identifiable, Codable, Equatable {
+              var id = UUID()
+              var name: String
+              var urlString: String
+
+              static let defaults: [LauncherItem] = [
+                  .init(name: "Phone", urlString: "tel://"),
+                  .init(name: "Messages", urlString: "sms://"),
+                  .init(name: "WhatsApp", urlString: "whatsapp://"),
+                  .init(name: "Camera", urlString: "camera://"),
+                  .init(name: "Photos", urlString: "photos-redirect://"),
+                  .init(name: "Safari", urlString: "https://www.google.com"),
+                  .init(name: "Chrome", urlString: "googlechrome://"),
+                  .init(name: "YouTube", urlString: "youtube://"),
+                  .init(name: "Spotify", urlString: "spotify://"),
+                  .init(name: "ChatGPT", urlString: "chatgpt://"),
+                  .init(name: "Gmail", urlString: "googlegmail://"),
+                  .init(name: "Files", urlString: "shareddocuments://"),
+                  .init(name: "Settings", urlString: "App-Prefs://")
+              ]
+          }
+
+          @MainActor
+          final class LauncherStore: ObservableObject {
+              @Published var items: [LauncherItem] { didSet { save() } }
+              @Published var launchFailed = false
+              @Published var failedName = ""
+              private let key = "textlauncher.items.v1"
+
+              init() {
+                  if let data = UserDefaults.standard.data(forKey: key),
+                     let saved = try? JSONDecoder().decode([LauncherItem].self, from: data),
+                     !saved.isEmpty {
+                      items = saved
+                  } else {
+                      items = LauncherItem.defaults
+                  }
+              }
+
+              func open(_ item: LauncherItem) {
+                  guard let url = URL(string: item.urlString) else { return fail(item) }
+                  UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                  UIApplication.shared.open(url, options: [:]) { [weak self] ok in
+                      Task { @MainActor in
+                          if !ok { self?.fail(item) }
+                      }
+                  }
+              }
+
+              func add(name: String, url: String) {
+                  let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                  let u = url.trimmingCharacters(in: .whitespacesAndNewlines)
+                  guard !n.isEmpty, !u.isEmpty else { return }
+                  items.append(.init(name: n, urlString: u))
+              }
+
+              func delete(_ offsets: IndexSet) { items.remove(atOffsets: offsets) }
+              func move(_ offsets: IndexSet, _ destination: Int) { items.move(fromOffsets: offsets, toOffset: destination) }
+              func reset() { items = LauncherItem.defaults }
+
+              private func save() {
+                  if let data = try? JSONEncoder().encode(items) {
+                      UserDefaults.standard.set(data, forKey: key)
+                  }
+              }
+
+              private func fail(_ item: LauncherItem) {
+                  failedName = item.name
+                  launchFailed = true
+              }
+          }
+
+          @main
+          struct TextLauncherApp: App {
+              @StateObject private var store = LauncherStore()
+              var body: some Scene {
+                  WindowGroup {
+                      ContentView()
+                          .environmentObject(store)
+                          .preferredColorScheme(.dark)
+                  }
+              }
+          }
+
+          struct ContentView: View {
+              @EnvironmentObject private var store: LauncherStore
+              @State private var showEditor = false
+
+              var body: some View {
+                  ZStack {
+                      Color.black.ignoresSafeArea()
+                      ScrollView(showsIndicators: false) {
+                          VStack(alignment: .leading, spacing: 0) {
+                              header.padding(.bottom, 42)
+                              LazyVStack(alignment: .leading, spacing: 21) {
+                                  ForEach(store.items) { item in
+                                      Button {
+                                          store.open(item)
+                                      } label: {
+                                          Text(item.name)
+                                              .font(.system(size: 16, weight: .regular))
+                                              .foregroundStyle(.white)
+                                              .frame(maxWidth: .infinity, alignment: .leading)
+                                              .contentShape(Rectangle())
+                                      }
+                                      .buttonStyle(.plain)
+                                  }
+                              }
+                          }
+                          .padding(.horizontal, 22)
+                          .padding(.top, 18)
+                          .padding(.bottom, 48)
+                      }
+                  }
+                  .onAppear { UIDevice.current.isBatteryMonitoringEnabled = true }
+                  .sheet(isPresented: $showEditor) { LauncherEditor().environmentObject(store) }
+                  .alert("Can't open \(store.failedName)", isPresented: $store.launchFailed) {
+                      Button("OK", role: .cancel) {}
+                      Button("Edit") { showEditor = true }
+                  } message: {
+                      Text("The app may not be installed or its URL scheme may be different.")
+                  }
+              }
+
+              private var header: some View {
+                  TimelineView(.periodic(from: .now, by: 30)) { context in
+                      VStack(alignment: .leading, spacing: 3) {
+                          Text(context.date.formatted(.dateTime.hour().minute()))
+                              .font(.system(size: 20, weight: .light))
+                              .foregroundStyle(.white)
+                          HStack(spacing: 6) {
+                              Text(context.date.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)))
+                              Text(batteryText)
+                          }
+                          .font(.system(size: 9, weight: .regular))
+                          .foregroundStyle(.secondary)
+                      }
+                      .frame(maxWidth: .infinity, alignment: .leading)
+                      .contentShape(Rectangle())
+                      .onLongPressGesture(minimumDuration: 0.65) {
+                          UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                          showEditor = true
+                      }
+                  }
+              }
+
+              private var batteryText: String {
+                  let level = UIDevice.current.batteryLevel
+                  guard level >= 0 else { return "--%" }
+                  return "\(Int((level * 100).rounded()))%"
+              }
+          }
+
+          struct LauncherEditor: View {
+              @Environment(\.dismiss) private var dismiss
+              @EnvironmentObject private var store: LauncherStore
+              @State private var name = ""
+              @State private var url = ""
+
+              var body: some View {
+                  NavigationStack {
+                      List {
+                          Section("Apps") {
+                              ForEach($store.items) { $item in
+                                  VStack(alignment: .leading, spacing: 5) {
+                                      TextField("Name", text: $item.name)
+                                      TextField("URL / deep link", text: $item.urlString)
+                                          .font(.system(.caption, design: .monospaced))
+                                          .textInputAutocapitalization(.never)
+                                          .autocorrectionDisabled()
+                                  }
+                              }
+                              .onDelete(perform: store.delete)
+                              .onMove { store.move($0, $1) }
+                          }
+
+                          Section("Add") {
+                              TextField("App name", text: $name)
+                              TextField("URL, e.g. spotify://", text: $url)
+                                  .textInputAutocapitalization(.never)
+                                  .autocorrectionDisabled()
+                              Button("Add app") {
+                                  store.add(name: name, url: url)
+                                  name = ""
+                                  url = ""
+                              }
+                          }
+
+                          Section {
+                              Button("Reset defaults", role: .destructive) { store.reset() }
+                          } footer: {
+                              Text("Long-press the clock on the launcher to open this editor.")
+                          }
+                      }
+                      .navigationTitle("Launcher")
+                      .toolbar {
+                          ToolbarItem(placement: .topBarLeading) { EditButton() }
+                          ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+                      }
+                  }
+              }
+          }
+          SWIFT
+
+          cd GeneratedTextLauncher
+          xcodegen generate
+
+      - name: Build unsigned iPhone app
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd GeneratedTextLauncher
+          xcodebuild \
+            -project TextLauncher.xcodeproj \
+            -scheme TextLauncher \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+          APP_PATH=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -print -quit)
+          test -n "$APP_PATH"
+          rm -rf Payload TextLauncher-unsigned.ipa
+          mkdir Payload
+          cp -R "$APP_PATH" Payload/
+          /usr/bin/zip -qry TextLauncher-unsigned.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: TextLauncher-unsigned-ipa
+          path: GeneratedTextLauncher/TextLauncher-unsigned.ipa
+          if-no-files-found: error
